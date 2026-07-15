@@ -116,9 +116,10 @@ fun TouchTestScreen(onResult: (DiagnosticStatus) -> Unit, onBack: () -> Unit) {
     }
 
     BackHandler(onBack = onBack)
-    Box(
-        Modifier.fillMaxSize().background(Color(0xFF101513)).onSizeChanged { size = it }
-            .pointerInput(size) {
+    Box(Modifier.fillMaxSize().background(Color(0xFF101513))) {
+        Canvas(
+            Modifier.fillMaxSize().onSizeChanged { size = it }
+                .pointerInput(size) {
                 awaitPointerEventScope {
                     while (true) {
                         val event = awaitPointerEvent()
@@ -129,8 +130,7 @@ fun TouchTestScreen(onResult: (DiagnosticStatus) -> Unit, onBack: () -> Unit) {
                     }
                 }
             },
-    ) {
-        Canvas(Modifier.fillMaxSize()) {
+        ) {
             val cw = this.size.width / columns
             val ch = this.size.height / rows
             repeat(rows) { row -> repeat(columns) { column ->
