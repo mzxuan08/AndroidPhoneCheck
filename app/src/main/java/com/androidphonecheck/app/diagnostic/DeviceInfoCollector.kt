@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.StatFs
 import android.util.DisplayMetrics
+import android.view.WindowManager
 import com.androidphonecheck.app.domain.DiagnosticCategory
 import com.androidphonecheck.app.domain.DiagnosticResult
 import com.androidphonecheck.app.domain.DiagnosticStatus
@@ -17,6 +18,7 @@ class DeviceInfoCollector(private val context: Context) {
         val memoryInfo = ActivityManager.MemoryInfo().also(activityManager::getMemoryInfo)
         val storage = StatFs(Environment.getDataDirectory().path)
         val metrics = context.resources.displayMetrics
+        val display = context.getSystemService(WindowManager::class.java).defaultDisplay
 
         return DiagnosticResult(
             id = "device_info",
@@ -36,6 +38,12 @@ class DeviceInfoCollector(private val context: Context) {
                 "存储可用" to (storage.availableBlocksLong * storage.blockSizeLong).toReadableSize(),
                 "逻辑分辨率" to "${metrics.widthPixels} × ${metrics.heightPixels}",
                 "像素密度" to "${metrics.densityDpi} dpi",
+                "当前刷新率" to String.format(Locale.getDefault(), "%.1f Hz", display.refreshRate),
+                "可用显示模式" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    display.supportedModes.joinToString { "${it.physicalWidth}×${it.physicalHeight}@${String.format(Locale.getDefault(), "%.0f", it.refreshRate)}Hz" }
+                } else {
+                    "系统未提供"
+                },
             ),
         )
     }
@@ -45,4 +53,3 @@ private fun Long.toReadableSize(): String {
     val gib = this / 1024.0 / 1024.0 / 1024.0
     return String.format(Locale.getDefault(), "%.1f GB", gib)
 }
-

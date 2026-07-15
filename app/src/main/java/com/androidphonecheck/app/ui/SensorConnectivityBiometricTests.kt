@@ -13,6 +13,7 @@ import android.location.LocationManager
 import android.net.wifi.WifiManager
 import android.nfc.NfcAdapter
 import android.os.Build
+import android.telephony.TelephonyManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -43,6 +44,7 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.androidphonecheck.app.domain.DiagnosticStatus
 import java.util.Locale
+import kotlin.math.abs
 
 @Composable
 fun SensorTestScreen(
@@ -62,6 +64,7 @@ fun SensorTestScreen(
         )
     }
     var readings by remember { mutableStateOf(emptyMap<Int, String>()) }
+    var ranges by remember { mutableStateOf(emptyMap<Int, Pair<Float, Float>>()) }
     val available = remember { definitions.filter { manager.getDefaultSensor(it.first) != null } }
 
     BackHandler(onBack = onBack)
@@ -72,6 +75,13 @@ fun SensorTestScreen(
                     String.format(Locale.getDefault(), "%.2f", it)
                 }
                 readings = readings + (event.sensor.type to formatted)
+                val magnitude = event.values.take(3).sumOf { abs(it.toDouble()) }.toFloat()
+                val previous = ranges[event.sensor.type]
+                ranges = ranges + (event.sensor.type to if (previous == null) {
+                    magnitude to magnitude
+                } else {
+                    minOf(previous.first, magnitude) to maxOf(previous.second, magnitude)
+                })
             }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
@@ -89,10 +99,22 @@ fun SensorTestScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("传感器实时测试", style = MaterialTheme.typography.headlineSmall)
-        Text("移动、旋转手机，遮挡听筒附近并改变环境光，观察数值是否变化。")
+        Text("按引导操作，应用会记录数值变化范围：遮挡并移开听筒、改变环境光、摇动和旋转手机。")
         definitions.forEach { (type, name) ->
             val exists = available.any { it.first == type }
-            Text("$name：${if (!exists) "未发现" else readings[type] ?: "等待数据……"}")
+            val range = ranges[type]
+            val change = range?.let { it.second - it.first }
+            val response = when {
+                !exists -> "不支持"
+                change == null -> "等待数据"
+                change > sensorChangeThreshold(type) -> "已检测到响应"
+                else -> "请继续按引导操作"
+            }
+            Text("$name：$response；${readings[type] ?: "--"}${change?.let { "；变化 ${String.format(Locale.getDefault(), "%.2f", it)}" } ?: ""}")
+            if (exists) {
+                val sensor = manager.getDefaultSensor(type)
+                Text("  ${sensor?.vendor.orEmpty()} · 量程 ${sensor?.maximumRange} · 分辨率 ${sensor?.resolution}")
+            }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Button(
@@ -117,6 +139,7 @@ fun ConnectivityTestScreen(
     val requiredPermissions = remember {
         buildList {
             add(Manifest.permission.ACCESS_COARSE_LOCATION)
+            add(Manifest.permission.READ_PHONE_STATE)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) add(Manifest.permission.BLUETOOTH_CONNECT)
         }.toTypedArray()
     }
@@ -153,13 +176,16 @@ fun ConnectivityTestScreen(
 }
 
 @Composable
-@SuppressLint("MissingPermission")
+@SuppressLint("MissingPermission", "MissingPermission", "DEPRECATION")
 private fun ConnectivityReadings(context: Context, permissionsGranted: Boolean) {
     val wifi = remember { context.applicationContext.getSystemService(WifiManager::class.java) }
     val bluetooth = remember { context.getSystemService(BluetoothManager::class.java)?.adapter }
     val nfc = remember { NfcAdapter.getDefaultAdapter(context) }
     val location = remember { context.getSystemService(LocationManager::class.java) }
-    Text("Wi-Fi：${if (wifi?.isWifiEnabled == true) "已开启" else "未开启或不支持"}")
+    val telephony = remember { context.getSystemService(TelephonyManager::class.java) }
+    val wifiInfo = runCatching { wifi?.connectionInfo }.getOrNull()
+    Text("Wi-Fi：${if (wifi?.isWifiEnabled == true) "已开启" else "未开启或不支持"}" +
+        (wifiInfo?.takeIf { it.networkId != -1 }?.let { " · RSSI ${it.rssi} dBm · ${WifiManager.calculateSignalLevel(it.rssi, 5)}/4级" } ?: ""))
     Text(
         "蓝牙：${when {
             bluetooth == null -> "不支持"
@@ -174,6 +200,34 @@ private fun ConnectivityReadings(context: Context, permissionsGranted: Boolean) 
             location.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
     }.getOrDefault(false)
     Text("定位服务：${if (locationEnabled) "已开启" else "未开启"}")
+    val simText = when (telephony?.simState) {
+        TelephonyManager.SIM_STATE_READY -> "SIM 已就绪"
+        TelephonyManager.SIM_STATE_ABSENT -> "未插入 SIM"
+        else -> "SIM 未就绪或状态受限"
+    }
+    val networkType = if (permissionGranted(context, Manifest.permission.READ_PHONE_STATE)) {
+        mobileNetworkName(runCatching { telephony?.dataNetworkType }.getOrNull())
+    } else "权限不足"
+    Text("移动网络：$simText · $networkType")
+}
+
+private fun sensorChangeThreshold(type: Int): Float = when (type) {
+    Sensor.TYPE_LIGHT -> 5f
+    Sensor.TYPE_PROXIMITY -> .5f
+    Sensor.TYPE_ACCELEROMETER -> 3f
+    Sensor.TYPE_GYROSCOPE -> .5f
+    Sensor.TYPE_MAGNETIC_FIELD -> 5f
+    else -> .1f
+}
+
+private fun mobileNetworkName(type: Int?): String = when (type) {
+    TelephonyManager.NETWORK_TYPE_LTE -> "4G LTE"
+    TelephonyManager.NETWORK_TYPE_NR -> "5G NR"
+    TelephonyManager.NETWORK_TYPE_HSPAP, TelephonyManager.NETWORK_TYPE_HSPA,
+    TelephonyManager.NETWORK_TYPE_UMTS -> "3G"
+    TelephonyManager.NETWORK_TYPE_EDGE, TelephonyManager.NETWORK_TYPE_GPRS -> "2G"
+    TelephonyManager.NETWORK_TYPE_UNKNOWN, null -> "网络类型未知"
+    else -> "移动网络（类型 $type）"
 }
 
 @Composable
@@ -250,9 +304,10 @@ private fun permissionGranted(context: Context, permission: String): Boolean =
 
 private fun connectionPermissionsGranted(context: Context): Boolean {
     val locationGranted = permissionGranted(context, Manifest.permission.ACCESS_COARSE_LOCATION)
+    val phoneGranted = permissionGranted(context, Manifest.permission.READ_PHONE_STATE)
     val bluetoothGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
         permissionGranted(context, Manifest.permission.BLUETOOTH_CONNECT)
-    return locationGranted && bluetoothGranted
+    return locationGranted && bluetoothGranted && phoneGranted
 }
 
 private fun biometricCapabilityMessage(code: Int): String = when (code) {
