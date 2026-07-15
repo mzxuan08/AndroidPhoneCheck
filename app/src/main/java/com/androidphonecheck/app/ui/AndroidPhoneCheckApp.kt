@@ -1,5 +1,7 @@
 package com.androidphonecheck.app.ui
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,12 +15,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -27,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -34,6 +40,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.androidphonecheck.app.domain.DiagnosticCategory
 import com.androidphonecheck.app.domain.DiagnosticResult
+import com.androidphonecheck.app.domain.DiagnosticStatus
+import com.androidphonecheck.app.data.DiagnosticSessionStore
 
 private val AppColorScheme = androidx.compose.material3.lightColorScheme(
     primary = Color(0xFF176B55),
@@ -44,15 +52,85 @@ private val AppColorScheme = androidx.compose.material3.lightColorScheme(
 @Composable
 fun AndroidPhoneCheckApp(automaticResults: List<DiagnosticResult>) {
     MaterialTheme(colorScheme = AppColorScheme) {
-        HomeScreen(automaticResults = automaticResults)
+        DiagnosticFlow(automaticResults = automaticResults)
+    }
+}
+
+private enum class AppScreen { HOME, CHECKLIST, DISPLAY_TEST, TOUCH_TEST, SUMMARY }
+
+@Composable
+private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
+    val context = LocalContext.current
+    val store = remember { DiagnosticSessionStore(context.applicationContext) }
+    var statuses by remember { mutableStateOf(store.loadStatuses()) }
+    var screen by remember { mutableStateOf(AppScreen.HOME) }
+
+    BackHandler(enabled = screen != AppScreen.HOME) {
+        screen = when (screen) {
+            AppScreen.SUMMARY -> AppScreen.CHECKLIST
+            AppScreen.DISPLAY_TEST, AppScreen.TOUCH_TEST -> AppScreen.CHECKLIST
+            AppScreen.CHECKLIST -> AppScreen.HOME
+            AppScreen.HOME -> AppScreen.HOME
+        }
+    }
+
+    when (screen) {
+        AppScreen.HOME -> HomeScreen(
+            automaticResults = automaticResults,
+            hasSession = store.hasSession(),
+            onStart = {
+                statuses = store.start(automaticResults.map { it.category }.toSet())
+                screen = AppScreen.CHECKLIST
+            },
+        )
+        AppScreen.CHECKLIST -> ChecklistScreen(
+            statuses = statuses,
+            onStatusChange = { category, status ->
+                statuses = store.update(category, status)
+            },
+            onSummary = { screen = AppScreen.SUMMARY },
+            onInteractiveTest = { category ->
+                screen = when (category) {
+                    DiagnosticCategory.DISPLAY -> AppScreen.DISPLAY_TEST
+                    DiagnosticCategory.TOUCH -> AppScreen.TOUCH_TEST
+                    else -> AppScreen.CHECKLIST
+                }
+            },
+            onBack = { screen = AppScreen.HOME },
+        )
+        AppScreen.DISPLAY_TEST -> DisplayTestScreen(
+            onResult = { status ->
+                statuses = store.update(DiagnosticCategory.DISPLAY, status)
+                screen = AppScreen.CHECKLIST
+            },
+            onBack = { screen = AppScreen.CHECKLIST },
+        )
+        AppScreen.TOUCH_TEST -> TouchTestScreen(
+            onResult = { status ->
+                statuses = store.update(DiagnosticCategory.TOUCH, status)
+                screen = AppScreen.CHECKLIST
+            },
+            onBack = { screen = AppScreen.CHECKLIST },
+        )
+        AppScreen.SUMMARY -> SummaryScreen(
+            statuses = statuses,
+            onBack = { screen = AppScreen.CHECKLIST },
+            onClear = {
+                statuses = store.clear()
+                screen = AppScreen.HOME
+            },
+        )
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HomeScreen(automaticResults: List<DiagnosticResult>) {
+private fun HomeScreen(
+    automaticResults: List<DiagnosticResult>,
+    hasSession: Boolean,
+    onStart: () -> Unit,
+) {
     val deviceInfo = automaticResults.first()
-    var hasStarted by remember { mutableStateOf(false) }
     Scaffold(
         topBar = { TopAppBar(title = { Text("安卓验机") }) },
     ) { innerPadding ->
@@ -97,7 +175,7 @@ private fun HomeScreen(automaticResults: List<DiagnosticResult>) {
                 val categoryResults = automaticResults.filter { it.category == category }
                 CategoryRow(
                     category = category,
-                    status = if (hasStarted && categoryResults.isNotEmpty()) {
+                    status = if (hasSession && categoryResults.isNotEmpty()) {
                         "已自动检测 ${categoryResults.size} 项"
                     } else {
                         "未测试"
@@ -106,18 +184,22 @@ private fun HomeScreen(automaticResults: List<DiagnosticResult>) {
             }
 
             Button(
-                onClick = { hasStarted = true },
+                onClick = onStart,
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(14.dp),
             ) {
-                Text(if (hasStarted) "继续交互测试" else "开始验机")
+                Text(if (hasSession) "继续验机" else "开始验机")
             }
         }
     }
 }
 
 @Composable
-private fun CategoryRow(category: DiagnosticCategory, status: String) {
+private fun CategoryRow(
+    category: DiagnosticCategory,
+    status: String,
+    onClick: (() -> Unit)? = null,
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
@@ -125,6 +207,7 @@ private fun CategoryRow(category: DiagnosticCategory, status: String) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
@@ -132,4 +215,147 @@ private fun CategoryRow(category: DiagnosticCategory, status: String) {
             Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChecklistScreen(
+    statuses: Map<DiagnosticCategory, DiagnosticStatus>,
+    onStatusChange: (DiagnosticCategory, DiagnosticStatus) -> Unit,
+    onSummary: () -> Unit,
+    onInteractiveTest: (DiagnosticCategory) -> Unit,
+    onBack: () -> Unit,
+) {
+    var selected by remember { mutableStateOf<DiagnosticCategory?>(null) }
+    Scaffold(
+        topBar = { TopAppBar(title = { Text("验机项目") }) },
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .verticalScroll(rememberScrollState())
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("点击项目记录测试结果。自动检测项目已预先标记，可随时复核。")
+            DiagnosticCategory.entries.forEach { category ->
+                CategoryRow(
+                    category = category,
+                    status = statuses.getValue(category).displayName,
+                    onClick = {
+                        if (category == DiagnosticCategory.DISPLAY || category == DiagnosticCategory.TOUCH) {
+                            onInteractiveTest(category)
+                        } else {
+                            selected = category
+                        }
+                    },
+                )
+            }
+            Button(onClick = onSummary, modifier = Modifier.fillMaxWidth()) {
+                Text("查看验机结果")
+            }
+            OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
+                Text("返回首页")
+            }
+        }
+    }
+
+    selected?.let { category ->
+        StatusDialog(
+            category = category,
+            onSelect = { status ->
+                onStatusChange(category, status)
+                selected = null
+            },
+            onDismiss = { selected = null },
+        )
+    }
+}
+
+@Composable
+private fun StatusDialog(
+    category: DiagnosticCategory,
+    onSelect: (DiagnosticStatus) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(category.displayName) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(
+                    DiagnosticStatus.NORMAL,
+                    DiagnosticStatus.ABNORMAL,
+                    DiagnosticStatus.RISK,
+                    DiagnosticStatus.NOT_TESTED,
+                    DiagnosticStatus.UNSUPPORTED,
+                    DiagnosticStatus.PERMISSION_REQUIRED,
+                ).forEach { status ->
+                    OutlinedButton(
+                        onClick = { onSelect(status) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(status.displayName)
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { OutlinedButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SummaryScreen(
+    statuses: Map<DiagnosticCategory, DiagnosticStatus>,
+    onBack: () -> Unit,
+    onClear: () -> Unit,
+) {
+    var confirmClear by remember { mutableStateOf(false) }
+    val abnormal = statuses.values.count { it == DiagnosticStatus.ABNORMAL }
+    val risks = statuses.values.count { it == DiagnosticStatus.RISK }
+    val incomplete = statuses.values.count {
+        it == DiagnosticStatus.NOT_TESTED || it == DiagnosticStatus.PERMISSION_REQUIRED
+    }
+    Scaffold(topBar = { TopAppBar(title = { Text("验机结果") }) }) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .verticalScroll(rememberScrollState())
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text("异常 $abnormal 项 · 风险 $risks 项 · 未完成 $incomplete 项", fontWeight = FontWeight.Bold)
+            statuses.entries
+                .sortedByDescending { statusPriority(it.value) }
+                .forEach { (category, status) -> CategoryRow(category, status.displayName) }
+            Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("返回继续检测") }
+            OutlinedButton(
+                onClick = { confirmClear = true },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text("清除本次验机") }
+        }
+    }
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("清除验机结果？") },
+            text = { Text("清除后无法恢复。") },
+            confirmButton = { Button(onClick = onClear) { Text("确认清除") } },
+            dismissButton = { OutlinedButton(onClick = { confirmClear = false }) { Text("取消") } },
+        )
+    }
+}
+
+private fun statusPriority(status: DiagnosticStatus): Int = when (status) {
+    DiagnosticStatus.ABNORMAL -> 6
+    DiagnosticStatus.RISK -> 5
+    DiagnosticStatus.PERMISSION_REQUIRED -> 4
+    DiagnosticStatus.NOT_TESTED -> 3
+    DiagnosticStatus.UNSUPPORTED -> 2
+    DiagnosticStatus.NORMAL -> 1
 }
