@@ -23,6 +23,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -38,15 +42,17 @@ private val AppColorScheme = androidx.compose.material3.lightColorScheme(
 )
 
 @Composable
-fun AndroidPhoneCheckApp(deviceInfo: DiagnosticResult) {
+fun AndroidPhoneCheckApp(automaticResults: List<DiagnosticResult>) {
     MaterialTheme(colorScheme = AppColorScheme) {
-        HomeScreen(deviceInfo = deviceInfo)
+        HomeScreen(automaticResults = automaticResults)
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HomeScreen(deviceInfo: DiagnosticResult) {
+private fun HomeScreen(automaticResults: List<DiagnosticResult>) {
+    val deviceInfo = automaticResults.first()
+    var hasStarted by remember { mutableStateOf(false) }
     Scaffold(
         topBar = { TopAppBar(title = { Text("安卓验机") }) },
     ) { innerPadding ->
@@ -88,22 +94,30 @@ private fun HomeScreen(deviceInfo: DiagnosticResult) {
 
             Text("检测项目", style = MaterialTheme.typography.titleMedium)
             DiagnosticCategory.entries.forEach { category ->
-                CategoryRow(category)
+                val categoryResults = automaticResults.filter { it.category == category }
+                CategoryRow(
+                    category = category,
+                    status = if (hasStarted && categoryResults.isNotEmpty()) {
+                        "已自动检测 ${categoryResults.size} 项"
+                    } else {
+                        "未测试"
+                    },
+                )
             }
 
             Button(
-                onClick = { },
+                onClick = { hasStarted = true },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(14.dp),
             ) {
-                Text("开始验机")
+                Text(if (hasStarted) "继续交互测试" else "开始验机")
             }
         }
     }
 }
 
 @Composable
-private fun CategoryRow(category: DiagnosticCategory) {
+private fun CategoryRow(category: DiagnosticCategory, status: String) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
@@ -115,8 +129,7 @@ private fun CategoryRow(category: DiagnosticCategory) {
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(category.displayName)
-            Text("未测试", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
-
