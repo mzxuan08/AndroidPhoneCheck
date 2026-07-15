@@ -56,7 +56,7 @@ fun AndroidPhoneCheckApp(automaticResults: List<DiagnosticResult>) {
     }
 }
 
-private enum class AppScreen { HOME, CHECKLIST, DISPLAY_TEST, TOUCH_TEST, SUMMARY }
+private enum class AppScreen { HOME, CHECKLIST, DISPLAY_TEST, TOUCH_TEST, CAMERA_TEST, AUDIO_TEST, PHYSICAL_TEST, SUMMARY }
 
 @Composable
 private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
@@ -68,7 +68,7 @@ private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
     BackHandler(enabled = screen != AppScreen.HOME) {
         screen = when (screen) {
             AppScreen.SUMMARY -> AppScreen.CHECKLIST
-            AppScreen.DISPLAY_TEST, AppScreen.TOUCH_TEST -> AppScreen.CHECKLIST
+            AppScreen.DISPLAY_TEST, AppScreen.TOUCH_TEST, AppScreen.CAMERA_TEST, AppScreen.AUDIO_TEST, AppScreen.PHYSICAL_TEST -> AppScreen.CHECKLIST
             AppScreen.CHECKLIST -> AppScreen.HOME
             AppScreen.HOME -> AppScreen.HOME
         }
@@ -93,6 +93,9 @@ private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
                 screen = when (category) {
                     DiagnosticCategory.DISPLAY -> AppScreen.DISPLAY_TEST
                     DiagnosticCategory.TOUCH -> AppScreen.TOUCH_TEST
+                    DiagnosticCategory.CAMERA -> AppScreen.CAMERA_TEST
+                    DiagnosticCategory.AUDIO -> AppScreen.AUDIO_TEST
+                    DiagnosticCategory.PHYSICAL -> AppScreen.PHYSICAL_TEST
                     else -> AppScreen.CHECKLIST
                 }
             },
@@ -108,6 +111,27 @@ private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
         AppScreen.TOUCH_TEST -> TouchTestScreen(
             onResult = { status ->
                 statuses = store.update(DiagnosticCategory.TOUCH, status)
+                screen = AppScreen.CHECKLIST
+            },
+            onBack = { screen = AppScreen.CHECKLIST },
+        )
+        AppScreen.CAMERA_TEST -> CameraTestScreen(
+            onResult = { status ->
+                statuses = store.update(DiagnosticCategory.CAMERA, status)
+                screen = AppScreen.CHECKLIST
+            },
+            onBack = { screen = AppScreen.CHECKLIST },
+        )
+        AppScreen.AUDIO_TEST -> AudioTestScreen(
+            onResult = { status ->
+                statuses = store.update(DiagnosticCategory.AUDIO, status)
+                screen = AppScreen.CHECKLIST
+            },
+            onBack = { screen = AppScreen.CHECKLIST },
+        )
+        AppScreen.PHYSICAL_TEST -> PhysicalTestScreen(
+            onResult = { status ->
+                statuses = store.update(DiagnosticCategory.PHYSICAL, status)
                 screen = AppScreen.CHECKLIST
             },
             onBack = { screen = AppScreen.CHECKLIST },
@@ -244,7 +268,14 @@ private fun ChecklistScreen(
                     category = category,
                     status = statuses.getValue(category).displayName,
                     onClick = {
-                        if (category == DiagnosticCategory.DISPLAY || category == DiagnosticCategory.TOUCH) {
+                        if (category in setOf(
+                                DiagnosticCategory.DISPLAY,
+                                DiagnosticCategory.TOUCH,
+                                DiagnosticCategory.CAMERA,
+                                DiagnosticCategory.AUDIO,
+                                DiagnosticCategory.PHYSICAL,
+                            )
+                        ) {
                             onInteractiveTest(category)
                         } else {
                             selected = category
