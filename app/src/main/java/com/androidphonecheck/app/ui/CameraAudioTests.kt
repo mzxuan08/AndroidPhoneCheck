@@ -20,13 +20,17 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -40,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
@@ -57,6 +62,7 @@ import java.io.FileOutputStream
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.PI
 import kotlin.math.sin
 
@@ -116,7 +122,8 @@ fun CameraTestScreen(
                 }
                 Text(verdict, color = if (result.verdict == AlgorithmVerdict.NORMAL) Color(0xFF70E0A8) else Color(0xFFFFCA70))
                 Text(
-                    String.format(Locale.getDefault(), "亮度 %.0f · 清晰度 %.0f · 偏色 %.0f", result.metrics.meanLuma, result.metrics.sharpness, result.metrics.chromaOffset),
+                    String.format(Locale.getDefault(), "亮度 %.0f · 清晰度 %.0f · 偏色 %.0f · 噪点 %.1f",
+                        result.metrics.meanLuma, result.metrics.sharpness, result.metrics.chromaOffset, result.metrics.noiseEstimate),
                     color = Color.White,
                 )
                 if (result.reasons.isNotEmpty()) Text(result.reasons.joinToString("；"), color = Color.White)
@@ -261,15 +268,20 @@ fun AudioTestScreen(
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
     var state by remember { mutableStateOf("等待录音") }
     var audioAssessment by remember { mutableStateOf<AudioAssessment?>(null) }
+    var waveform by remember { mutableStateOf(List(64) { 0f }) }
     val speakerPlayback = remember { SpeakerPlayback() }
+    val disposed = remember { AtomicBoolean(false) }
+    val stopRecording = remember { AtomicBoolean(false) }
+    val recorderRef = remember { AtomicReference<AudioRecord?>(null) }
+    val threadRef = remember { AtomicReference<Thread?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
-            runCatching { recorder?.stop() }
-            recorder?.release()
-            recordThread?.interrupt()
+            disposed.set(true)
+            stopRecording.set(true)
+            threadRef.get()?.interrupt()
             player?.release()
-            recordingFile.delete()
+            if (threadRef.get() == null) recordingFile.delete()
             speakerPlayback.release()
         }
     }
@@ -278,6 +290,7 @@ fun AudioTestScreen(
         player?.release()
         player = null
         audioAssessment = null
+        stopRecording.set(false)
         val sampleRate = 16_000
         val bufferSize = maxOf(
             AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT),
@@ -290,36 +303,57 @@ fun AudioTestScreen(
             )
             check(audioRecord.state == AudioRecord.STATE_INITIALIZED) { "麦克风初始化失败" }
             recorder = audioRecord
+            recorderRef.set(audioRecord)
             audioRecord.startRecording()
             state = "请先保持安静 2 秒……"
             val main = Handler(Looper.getMainLooper())
             recordThread = Thread {
                 val all = ArrayList<Short>(sampleRate * 7)
                 val buffer = ShortArray(bufferSize / 2)
-                val started = System.currentTimeMillis()
-                while (!Thread.currentThread().isInterrupted && System.currentTimeMillis() - started < 7_000) {
-                    val read = audioRecord.read(buffer, 0, buffer.size)
-                    if (read > 0) repeat(read) { all.add(buffer[it]) }
-                    val elapsed = System.currentTimeMillis() - started
-                    if (elapsed in 2_000..2_200) main.post { state = "请正常说话 5 秒……" }
-                }
-                runCatching { audioRecord.stop() }
-                audioRecord.release()
-                val samples = all.toShortArray()
-                val split = minOf(sampleRate * 2, samples.size)
-                if (samples.size > split) {
-                    val noise = samples.copyOfRange(0, split)
-                    val speech = samples.copyOfRange(split, samples.size)
-                    writeWave(recordingFile, samples, sampleRate)
-                    val result = AudioAlgorithm.assess(AudioAlgorithm.measure(noise, speech))
-                    main.post {
-                        recorder = null
-                        recordThread = null
-                        audioAssessment = result
-                        state = "智能检测完成，可回放人工确认"
+                try {
+                    val started = System.currentTimeMillis()
+                    var lastWaveUpdate = 0L
+                    while (!stopRecording.get() && !Thread.currentThread().isInterrupted && System.currentTimeMillis() - started < 7_000) {
+                        val read = audioRecord.read(buffer, 0, buffer.size)
+                        if (read > 0) repeat(read) { all.add(buffer[it]) }
+                        val elapsed = System.currentTimeMillis() - started
+                        if (read > 0 && elapsed - lastWaveUpdate >= 80) {
+                            lastWaveUpdate = elapsed
+                            val step = maxOf(1, read / 64)
+                            val levels = List(64) { slot ->
+                                val from = minOf(slot * step, read - 1)
+                                val to = minOf(from + step, read)
+                                (from until to).maxOfOrNull { kotlin.math.abs(buffer[it].toInt()) }?.div(32768f) ?: 0f
+                            }
+                            main.post { if (!disposed.get()) waveform = levels }
+                        }
+                        if (elapsed in 2_000..2_200) main.post { if (!disposed.get()) state = "请正常说话 5 秒……" }
                     }
-                } else main.post { recorder = null; state = "录音时间过短，请重试" }
-            }.also { it.start() }
+                    val samples = all.toShortArray()
+                    val split = minOf(sampleRate * 2, samples.size)
+                    if (!disposed.get() && samples.size > split) {
+                        val noise = samples.copyOfRange(0, split)
+                        val speech = samples.copyOfRange(split, samples.size)
+                        writeWave(recordingFile, samples, sampleRate)
+                        val result = AudioAlgorithm.assess(AudioAlgorithm.measure(noise, speech))
+                        main.post {
+                            if (!disposed.get()) {
+                                recorder = null; recordThread = null
+                                audioAssessment = result
+                                state = "智能检测完成，可回放人工确认"
+                            }
+                        }
+                    } else if (!disposed.get()) main.post {
+                        recorder = null; recordThread = null; state = "录音时间过短，请重试"
+                    }
+                } finally {
+                    runCatching { audioRecord.stop() }
+                    audioRecord.release()
+                    recorderRef.compareAndSet(audioRecord, null)
+                    threadRef.set(null)
+                    if (disposed.get()) recordingFile.delete()
+                }
+            }.also { thread -> threadRef.set(thread); thread.start() }
         }.onFailure {
             recorder?.release()
             recorder = null
@@ -328,7 +362,7 @@ fun AudioTestScreen(
     }
 
     fun stopRecording() {
-        recordThread?.interrupt()
+        stopRecording.set(true)
         state = "正在结束录音……"
     }
 
@@ -350,12 +384,20 @@ fun AudioTestScreen(
     }
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(20.dp),
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Text("麦克风与扬声器", style = MaterialTheme.typography.headlineSmall)
         Text("录制一段语音后回放，同时检查麦克风是否收音、扬声器是否清晰。")
         Text(state, color = MaterialTheme.colorScheme.primary)
+        Canvas(Modifier.fillMaxWidth().height(72.dp).background(Color(0xFF101513))) {
+            val middle = size.height / 2
+            val step = size.width / waveform.size.coerceAtLeast(1)
+            waveform.forEachIndexed { index, value ->
+                val amplitude = value.coerceIn(0f, 1f) * middle
+                drawLine(Color(0xFF70E0A8), Offset(index * step, middle - amplitude), Offset(index * step, middle + amplitude), 3f)
+            }
+        }
         audioAssessment?.let { result ->
             Text(
                 when (result.verdict) {
@@ -365,8 +407,9 @@ fun AudioTestScreen(
                 },
                 color = MaterialTheme.colorScheme.primary,
             )
-            Text(String.format(Locale.getDefault(), "音量 %.0f · 信噪比 %.1f dB · 削波 %.1f%% · 断音 %.1f%%",
-                result.metrics.rms, result.metrics.snrDb, result.metrics.clippingRatio * 100, result.metrics.dropoutRatio * 100))
+            Text(String.format(Locale.getDefault(), "音量 %.0f · 信噪比 %.1f dB · 语音频段 %.0f%% · 主频 %.0f Hz · 削波 %.1f%% · 断音 %.1f%%",
+                result.metrics.rms, result.metrics.snrDb, result.metrics.voiceBandRatio * 100, result.metrics.dominantFrequencyHz,
+                result.metrics.clippingRatio * 100, result.metrics.dropoutRatio * 100))
             if (result.reasons.isNotEmpty()) Text(result.reasons.joinToString("；"))
         }
         Button(
@@ -397,13 +440,15 @@ fun AudioTestScreen(
 }
 
 private fun CameraAssessment?.cameraEvidence(): String = this?.let {
-    String.format(Locale.getDefault(), "算法=%s；亮度=%.1f；清晰度=%.1f；偏色=%.1f；依据=%s",
-        verdict.name, metrics.meanLuma, metrics.sharpness, metrics.chromaOffset, reasons.joinToString("；").ifEmpty { "无异常指标" })
+    String.format(Locale.getDefault(), "算法=%s；亮度=%.1f；清晰度=%.1f；偏色=%.1f；噪点=%.1f；依据=%s",
+        verdict.name, metrics.meanLuma, metrics.sharpness, metrics.chromaOffset, metrics.noiseEstimate,
+        reasons.joinToString("；").ifEmpty { "无异常指标" })
 } ?: "人工检查，算法尚未完成"
 
 private fun AudioAssessment?.audioEvidence(): String = this?.let {
-    String.format(Locale.getDefault(), "算法=%s；RMS=%.1f；SNR=%.1fdB；削波=%.2f%%；断音=%.2f%%；依据=%s",
-        verdict.name, metrics.rms, metrics.snrDb, metrics.clippingRatio * 100, metrics.dropoutRatio * 100,
+    String.format(Locale.getDefault(), "算法=%s；RMS=%.1f；SNR=%.1fdB；语音频段=%.1f%%；主频=%.1fHz；削波=%.2f%%；断音=%.2f%%；依据=%s",
+        verdict.name, metrics.rms, metrics.snrDb, metrics.voiceBandRatio * 100, metrics.dominantFrequencyHz,
+        metrics.clippingRatio * 100, metrics.dropoutRatio * 100,
         reasons.joinToString("；").ifEmpty { "无异常指标" })
 } ?: "人工检查，算法尚未完成"
 

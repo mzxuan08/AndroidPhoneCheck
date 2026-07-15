@@ -1,8 +1,10 @@
 package com.androidphonecheck.app.diagnostic
 
 import kotlin.math.abs
-import kotlin.math.ln
+import kotlin.math.PI
+import kotlin.math.cos
 import kotlin.math.log10
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 enum class AlgorithmVerdict { NORMAL, SUSPECTED, UNSUITABLE }
@@ -13,6 +15,7 @@ data class CameraMetrics(
     val brightRatio: Double,
     val sharpness: Double,
     val chromaOffset: Double,
+    val noiseEstimate: Double,
 )
 
 data class CameraAssessment(val verdict: AlgorithmVerdict, val reasons: List<String>, val metrics: CameraMetrics)
@@ -23,13 +26,16 @@ object CameraAlgorithm {
         var sum = 0.0
         var dark = 0
         var bright = 0
-        for (value in y.take(width * height)) {
-            val level = value.toInt() and 0xff
+        val count = width * height
+        for (index in 0 until count) {
+            val level = y[index].toInt() and 0xff
             sum += level
             if (level < 20) dark++
             if (level > 235) bright++
         }
         var laplacianEnergy = 0.0
+        var flatNoise = 0.0
+        var flatSamples = 0
         var samples = 0
         for (row in 1 until height - 1 step 2) for (column in 1 until width - 1 step 2) {
             val center = y[row * width + column].toInt() and 0xff
@@ -39,15 +45,25 @@ object CameraAlgorithm {
                 (y[row * width + column - 1].toInt() and 0xff) -
                 (y[row * width + column + 1].toInt() and 0xff)
             laplacianEnergy += laplacian.toDouble() * laplacian
+            val left = y[row * width + column - 1].toInt() and 0xff
+            val right = y[row * width + column + 1].toInt() and 0xff
+            val top = y[(row - 1) * width + column].toInt() and 0xff
+            val bottom = y[(row + 1) * width + column].toInt() and 0xff
+            val minimum = minOf(left, right, top, bottom)
+            val maximum = maxOf(left, right, top, bottom)
+            if (maximum - minimum < 18) {
+                flatNoise += abs(center - (left + right + top + bottom) / 4.0)
+                flatSamples++
+            }
             samples++
         }
-        val count = width * height
         return CameraMetrics(
             meanLuma = sum / count,
             darkRatio = dark.toDouble() / count,
             brightRatio = bright.toDouble() / count,
             sharpness = laplacianEnergy / samples.coerceAtLeast(1),
             chromaOffset = sqrt((uMean - 128) * (uMean - 128) + (vMean - 128) * (vMean - 128)),
+            noiseEstimate = flatNoise / flatSamples.coerceAtLeast(1),
         )
     }
 
@@ -61,6 +77,7 @@ object CameraAlgorithm {
         val reasons = buildList {
             if (metrics.sharpness < 35) add("画面纹理较少或清晰度偏低")
             if (metrics.chromaOffset > 42) add("画面存在明显色偏")
+            if (metrics.noiseEstimate > 9) add("平坦区域噪点偏高")
             if (metrics.darkRatio > .65) add("暗部比例偏高")
             if (metrics.brightRatio > .65) add("高光比例偏高")
         }
@@ -94,11 +111,16 @@ class CameraSequenceAnalyzer(private val requiredSamples: Int = 15) {
             brightRatio = average { it.brightRatio },
             sharpness = average { it.sharpness },
             chromaOffset = average { it.chromaOffset },
+            noiseEstimate = average { it.noiseEstimate },
         )
         val base = CameraAlgorithm.assess(averaged)
         val reasons = base.reasons.toMutableList()
         val meanFrameDifference = frameDifferences.average().takeUnless { it.isNaN() } ?: 0.0
         if (meanFrameDifference < .25 && averaged.sharpness > 35) reasons += "连续画面几乎完全不变，疑似画面冻结"
+        if (meanFrameDifference > 22) {
+            return CameraAssessment(AlgorithmVerdict.UNSUITABLE, reasons + "画面晃动或场景变化过大，请稳定手机重测", averaged)
+                .also { samples.clear(); frameDifferences.clear() }
+        }
         val verdict = when {
             base.verdict == AlgorithmVerdict.UNSUITABLE -> AlgorithmVerdict.UNSUITABLE
             reasons.isNotEmpty() -> AlgorithmVerdict.SUSPECTED
@@ -117,6 +139,8 @@ data class AudioMetrics(
     val clippingRatio: Double,
     val dropoutRatio: Double,
     val zeroCrossingRate: Double,
+    val voiceBandRatio: Double,
+    val dominantFrequencyHz: Double,
 )
 
 data class AudioAssessment(val verdict: AlgorithmVerdict, val reasons: List<String>, val metrics: AudioMetrics)
@@ -133,6 +157,7 @@ object AudioAlgorithm {
             .toDouble() / ((speech.size + window - 1) / window).coerceAtLeast(1)
         var crossings = 0
         for (i in 1 until speech.size) if ((speech[i] >= 0) != (speech[i - 1] >= 0)) crossings++
+        val spectrum = spectrum(speech, 16_000)
         return AudioMetrics(
             rms = speechRms,
             peak = peak,
@@ -140,6 +165,8 @@ object AudioAlgorithm {
             clippingRatio = clipping,
             dropoutRatio = dropout,
             zeroCrossingRate = crossings.toDouble() / speech.size.coerceAtLeast(1),
+            voiceBandRatio = spectrum.voiceBandRatio,
+            dominantFrequencyHz = spectrum.dominantFrequencyHz,
         )
     }
 
@@ -151,7 +178,59 @@ object AudioAlgorithm {
             if (metrics.clippingRatio > .02) add("录音存在明显削波/爆音")
             if (metrics.dropoutRatio > .08) add("录音存在疑似断音")
             if (metrics.zeroCrossingRate !in .01..0.45) add("语音频率特征异常")
+            if (metrics.voiceBandRatio < .55) add("语音频段能量占比偏低")
         }
         return AudioAssessment(if (reasons.isEmpty()) AlgorithmVerdict.NORMAL else AlgorithmVerdict.SUSPECTED, reasons, metrics)
+    }
+
+    private data class Spectrum(val voiceBandRatio: Double, val dominantFrequencyHz: Double)
+
+    private fun spectrum(input: ShortArray, sampleRate: Int): Spectrum {
+        val size = minOf(4096, Integer.highestOneBit(input.size.coerceAtLeast(2)))
+        if (size < 256) return Spectrum(0.0, 0.0)
+        val real = DoubleArray(size)
+        val imaginary = DoubleArray(size)
+        val start = input.size - size
+        repeat(size) { i ->
+            val window = .5 - .5 * cos(2 * PI * i / (size - 1))
+            real[i] = input[start + i] * window
+        }
+        var j = 0
+        for (i in 1 until size) {
+            var bit = size shr 1
+            while (j and bit != 0) { j = j xor bit; bit = bit shr 1 }
+            j = j xor bit
+            if (i < j) {
+                val tr = real[i]; real[i] = real[j]; real[j] = tr
+                val ti = imaginary[i]; imaginary[i] = imaginary[j]; imaginary[j] = ti
+            }
+        }
+        var length = 2
+        while (length <= size) {
+            val angle = -2 * PI / length
+            val wLenR = cos(angle); val wLenI = sin(angle)
+            for (offset in 0 until size step length) {
+                var wr = 1.0; var wi = 0.0
+                for (k in 0 until length / 2) {
+                    val even = offset + k; val odd = even + length / 2
+                    val or = real[odd] * wr - imaginary[odd] * wi
+                    val oi = real[odd] * wi + imaginary[odd] * wr
+                    real[odd] = real[even] - or; imaginary[odd] = imaginary[even] - oi
+                    real[even] += or; imaginary[even] += oi
+                    val nextWr = wr * wLenR - wi * wLenI
+                    wi = wr * wLenI + wi * wLenR; wr = nextWr
+                }
+            }
+            length = length shl 1
+        }
+        var voice = 0.0; var audible = 0.0; var maxEnergy = 0.0; var maxBin = 0
+        for (bin in 1 until size / 2) {
+            val hz = bin.toDouble() * sampleRate / size
+            val energy = real[bin] * real[bin] + imaginary[bin] * imaginary[bin]
+            if (hz in 80.0..8_000.0) audible += energy
+            if (hz in 80.0..4_000.0) voice += energy
+            if (hz in 80.0..8_000.0 && energy > maxEnergy) { maxEnergy = energy; maxBin = bin }
+        }
+        return Spectrum(voice / audible.coerceAtLeast(1.0), maxBin.toDouble() * sampleRate / size)
     }
 }

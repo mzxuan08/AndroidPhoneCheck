@@ -28,12 +28,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -43,6 +46,9 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.androidphonecheck.app.domain.DiagnosticStatus
+import com.androidphonecheck.app.diagnostic.SensorCheckRule
+import com.androidphonecheck.app.diagnostic.SensorResponse
+import com.androidphonecheck.app.diagnostic.SensorResponseEvaluator
 import java.util.Locale
 import kotlin.math.abs
 
@@ -65,7 +71,16 @@ fun SensorTestScreen(
     }
     var readings by remember { mutableStateOf(emptyMap<Int, String>()) }
     var ranges by remember { mutableStateOf(emptyMap<Int, Pair<Float, Float>>()) }
+    var sampleCounts by remember { mutableStateOf(emptyMap<Int, Int>()) }
+    var currentStep by remember { mutableIntStateOf(0) }
+    var completedSteps by remember { mutableStateOf(emptySet<Int>()) }
     val available = remember { definitions.filter { manager.getDefaultSensor(it.first) != null } }
+
+    LaunchedEffect(currentStep) {
+        val type = definitions[currentStep].first
+        ranges = ranges - type
+        sampleCounts = sampleCounts - type
+    }
 
     BackHandler(onBack = onBack)
     DisposableEffect(manager) {
@@ -82,6 +97,7 @@ fun SensorTestScreen(
                 } else {
                     minOf(previous.first, magnitude) to maxOf(previous.second, magnitude)
                 })
+                sampleCounts = sampleCounts + (event.sensor.type to (sampleCounts[event.sensor.type] ?: 0) + 1)
             }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
@@ -99,7 +115,44 @@ fun SensorTestScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("传感器实时测试", style = MaterialTheme.typography.headlineSmall)
-        Text("按引导操作，应用会记录数值变化范围：遮挡并移开听筒、改变环境光、摇动和旋转手机。")
+        Text("请逐项按提示操作。不存在的传感器会记为不支持，不会误判损坏。")
+        val current = definitions[currentStep]
+        val currentSensor = manager.getDefaultSensor(current.first)
+        val currentRange = ranges[current.first]
+        val rule = sensorRule(current.first)
+        val guidedResponse = SensorResponseEvaluator.evaluate(
+            supported = currentSensor != null,
+            sampleCount = sampleCounts[current.first] ?: 0,
+            minimum = currentRange?.first,
+            maximum = currentRange?.second,
+            rule = rule,
+        )
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("第 ${currentStep + 1}/${definitions.size} 项：${current.second}", style = MaterialTheme.typography.titleMedium)
+                Text(rule.instruction)
+                Text("判定：${sensorResponseText(guidedResponse)}")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            ranges = ranges - current.first
+                            sampleCounts = sampleCounts - current.first
+                            completedSteps = completedSteps - currentStep
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) { Text("重新采样") }
+                    Button(
+                        onClick = {
+                            completedSteps = completedSteps + currentStep
+                            if (currentStep < definitions.lastIndex) currentStep++
+                        },
+                        enabled = guidedResponse != SensorResponse.WAITING,
+                        modifier = Modifier.weight(1f),
+                    ) { Text(if (currentStep == definitions.lastIndex) "完成此项" else "下一项") }
+                }
+            }
+        }
+        Text("全部传感器概览", style = MaterialTheme.typography.titleMedium)
         definitions.forEach { (type, name) ->
             val exists = available.any { it.first == type }
             val range = ranges[type]
@@ -117,10 +170,20 @@ fun SensorTestScreen(
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            val allSupportedResponded = definitions.withIndex().all { (index, definition) ->
+                val sensor = manager.getDefaultSensor(definition.first)
+                index in completedSteps && (sensor == null || SensorResponseEvaluator.evaluate(
+                    supported = true,
+                    sampleCount = sampleCounts[definition.first] ?: 0,
+                    minimum = ranges[definition.first]?.first,
+                    maximum = ranges[definition.first]?.second,
+                    rule = sensorRule(definition.first),
+                ) == SensorResponse.RESPONDED)
+            }
             Button(
                 onClick = { onResult(DiagnosticStatus.NORMAL) },
                 modifier = Modifier.weight(1f),
-                enabled = readings.isNotEmpty(),
+                enabled = allSupportedResponded,
             ) { Text("数据正常") }
             Button(onClick = { onResult(DiagnosticStatus.ABNORMAL) }, modifier = Modifier.weight(1f)) {
                 Text("发现异常")
@@ -218,6 +281,23 @@ private fun sensorChangeThreshold(type: Int): Float = when (type) {
     Sensor.TYPE_GYROSCOPE -> .5f
     Sensor.TYPE_MAGNETIC_FIELD -> 5f
     else -> .1f
+}
+
+private fun sensorRule(type: Int): SensorCheckRule = when (type) {
+    Sensor.TYPE_LIGHT -> SensorCheckRule("先用手遮住听筒附近区域，再移开并对准光源。", 5f)
+    Sensor.TYPE_PROXIMITY -> SensorCheckRule("将手掌靠近听筒区域，再完全移开。", .5f)
+    Sensor.TYPE_ACCELEROMETER -> SensorCheckRule("上下、左右轻轻摇动手机。", 3f)
+    Sensor.TYPE_GYROSCOPE -> SensorCheckRule("绕三个方向缓慢旋转手机。", .5f)
+    Sensor.TYPE_MAGNETIC_FIELD -> SensorCheckRule("远离磁性物体，水平转动手机一圈。", 5f)
+    Sensor.TYPE_PRESSURE -> SensorCheckRule("静置手机并轻微改变高度；气压变化很小时可稍后人工确认。", .1f)
+    else -> SensorCheckRule("移动手机并观察数值变化。", .1f)
+}
+
+private fun sensorResponseText(response: SensorResponse): String = when (response) {
+    SensorResponse.WAITING -> "采样中，请继续操作"
+    SensorResponse.RESPONDED -> "已检测到有效响应"
+    SensorResponse.NO_RESPONSE -> "已采集足够数据但变化不足，建议重试或人工复核"
+    SensorResponse.UNSUPPORTED -> "本机不支持"
 }
 
 private fun mobileNetworkName(type: Int?): String = when (type) {
