@@ -17,11 +17,13 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,6 +41,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.androidphonecheck.app.domain.DiagnosticStatus
+import kotlinx.coroutines.delay
 import kotlin.math.floor
 
 @Composable
@@ -64,30 +67,57 @@ fun DisplayTestScreen(onResult: (DiagnosticStatus) -> Unit, onBack: () -> Unit) 
         )
     }
     var index by remember { mutableIntStateOf(0) }
-    var controlsVisible by remember { mutableStateOf(true) }
+    var controlsVisible by remember { mutableStateOf(false) }
+    var hintVisible by remember { mutableStateOf(true) }
+    var inputEnabled by remember { mutableStateOf(false) }
+    val currentIndex by rememberUpdatedState(index)
+    val isInputEnabled by rememberUpdatedState(inputEnabled)
     val (name, color) = colors[index]
     BackHandler(onBack = onBack)
-    Box(
-        Modifier.fillMaxSize().background(color).pointerInput(Unit) {
-            detectTapGestures(
-                onTap = { index = (index + 1) % colors.size },
-                onDoubleTap = { controlsVisible = !controlsVisible },
-                onLongPress = { onBack() },
+    LaunchedEffect(Unit) {
+        delay(500)
+        inputEnabled = true
+        delay(1_300)
+        hintVisible = false
+    }
+    Box(Modifier.fillMaxSize().background(color)) {
+        if (!controlsVisible) {
+            Box(
+                Modifier.fillMaxSize().pointerInput(Unit) {
+                    detectTapGestures(
+                        onTap = {
+                            if (!isInputEnabled) return@detectTapGestures
+                            if (currentIndex < colors.lastIndex) index = currentIndex + 1 else controlsVisible = true
+                            hintVisible = false
+                        },
+                        onLongPress = { onBack() },
+                    )
+                },
             )
-        },
-    ) {
+        }
+        if (hintVisible && !controlsVisible) {
+            Text(
+                "单击换色 · 六种颜色完成后记录结果 · 长按退出",
+                Modifier.align(Alignment.Center).background(Color(0xBB202020)).padding(14.dp),
+                color = Color.White,
+            )
+        }
         if (controlsVisible) {
             Column(
                 Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                     .background(Color(0xCC202020)).padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("$name（${index + 1}/${colors.size}）· 单击换色 · 双击隐藏 · 长按退出", color = Color.White)
-                Text("观察坏点、色斑、闪烁和漏光。", color = Color.White)
+                Text("六种颜色已完成", color = Color.White)
+                Text("请根据观察到的坏点、色斑、闪烁和漏光记录结果。", color = Color.White)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button({ onResult(DiagnosticStatus.NORMAL) }, Modifier.weight(1f)) { Text("显示正常") }
                     Button({ onResult(DiagnosticStatus.ABNORMAL) }, Modifier.weight(1f)) { Text("发现异常") }
                 }
+                OutlinedButton(
+                    onClick = { index = 0; controlsVisible = false; hintVisible = true },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("重新测试", color = Color.White) }
                 OutlinedButton(onBack, Modifier.fillMaxWidth()) { Text("稍后测试", color = Color.White) }
             }
         }
