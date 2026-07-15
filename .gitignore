@@ -10,3 +10,4 @@
 /.gradle-user-home
 /.android-sdk
 /.adb
+/.signing/
