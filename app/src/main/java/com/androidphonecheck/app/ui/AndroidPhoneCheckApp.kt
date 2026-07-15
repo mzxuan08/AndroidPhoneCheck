@@ -56,7 +56,7 @@ fun AndroidPhoneCheckApp(automaticResults: List<DiagnosticResult>) {
     }
 }
 
-private enum class AppScreen { HOME, CHECKLIST, DISPLAY_TEST, TOUCH_TEST, CAMERA_TEST, AUDIO_TEST, PHYSICAL_TEST, SENSOR_TEST, CONNECTIVITY_TEST, BIOMETRIC_TEST, SUMMARY }
+private enum class AppScreen { HOME, CHECKLIST, DISPLAY_TEST, TOUCH_TEST, CAMERA_TEST, AUDIO_TEST, PHYSICAL_TEST, SENSOR_TEST, CONNECTIVITY_TEST, BIOMETRIC_TEST, USB_STORAGE_TEST, SECURITY_TEST, SUMMARY }
 
 @Composable
 private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
@@ -68,7 +68,7 @@ private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
     BackHandler(enabled = screen != AppScreen.HOME) {
         screen = when (screen) {
             AppScreen.SUMMARY -> AppScreen.CHECKLIST
-            AppScreen.DISPLAY_TEST, AppScreen.TOUCH_TEST, AppScreen.CAMERA_TEST, AppScreen.AUDIO_TEST, AppScreen.PHYSICAL_TEST, AppScreen.SENSOR_TEST, AppScreen.CONNECTIVITY_TEST, AppScreen.BIOMETRIC_TEST -> AppScreen.CHECKLIST
+            AppScreen.DISPLAY_TEST, AppScreen.TOUCH_TEST, AppScreen.CAMERA_TEST, AppScreen.AUDIO_TEST, AppScreen.PHYSICAL_TEST, AppScreen.SENSOR_TEST, AppScreen.CONNECTIVITY_TEST, AppScreen.BIOMETRIC_TEST, AppScreen.USB_STORAGE_TEST, AppScreen.SECURITY_TEST -> AppScreen.CHECKLIST
             AppScreen.CHECKLIST -> AppScreen.HOME
             AppScreen.HOME -> AppScreen.HOME
         }
@@ -99,6 +99,8 @@ private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
                     DiagnosticCategory.SENSOR -> AppScreen.SENSOR_TEST
                     DiagnosticCategory.CONNECTIVITY -> AppScreen.CONNECTIVITY_TEST
                     DiagnosticCategory.BIOMETRIC -> AppScreen.BIOMETRIC_TEST
+                    DiagnosticCategory.USB_STORAGE -> AppScreen.USB_STORAGE_TEST
+                    DiagnosticCategory.SECURITY -> AppScreen.SECURITY_TEST
                     else -> AppScreen.CHECKLIST
                 }
             },
@@ -160,8 +162,23 @@ private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
             },
             onBack = { screen = AppScreen.CHECKLIST },
         )
+        AppScreen.USB_STORAGE_TEST -> UsbStorageTestScreen(
+            onResult = { status ->
+                statuses = store.update(DiagnosticCategory.USB_STORAGE, status)
+                screen = AppScreen.CHECKLIST
+            },
+            onBack = { screen = AppScreen.CHECKLIST },
+        )
+        AppScreen.SECURITY_TEST -> SecurityRiskTestScreen(
+            onResult = { status ->
+                statuses = store.update(DiagnosticCategory.SECURITY, status)
+                screen = AppScreen.CHECKLIST
+            },
+            onBack = { screen = AppScreen.CHECKLIST },
+        )
         AppScreen.SUMMARY -> SummaryScreen(
             statuses = statuses,
+            automaticResults = automaticResults,
             onBack = { screen = AppScreen.CHECKLIST },
             onClear = {
                 statuses = store.clear()
@@ -301,6 +318,8 @@ private fun ChecklistScreen(
                                 DiagnosticCategory.SENSOR,
                                 DiagnosticCategory.CONNECTIVITY,
                                 DiagnosticCategory.BIOMETRIC,
+                                DiagnosticCategory.USB_STORAGE,
+                                DiagnosticCategory.SECURITY,
                             )
                         ) {
                             onInteractiveTest(category)
@@ -368,6 +387,7 @@ private fun StatusDialog(
 @Composable
 private fun SummaryScreen(
     statuses: Map<DiagnosticCategory, DiagnosticStatus>,
+    automaticResults: List<DiagnosticResult>,
     onBack: () -> Unit,
     onClear: () -> Unit,
 ) {
@@ -390,6 +410,16 @@ private fun SummaryScreen(
             statuses.entries
                 .sortedByDescending { statusPriority(it.value) }
                 .forEach { (category, status) -> CategoryRow(category, status.displayName) }
+            Text("自动采集详情", style = MaterialTheme.typography.titleMedium)
+            automaticResults.forEach { result ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(result.title, fontWeight = FontWeight.Bold)
+                        Text(result.summary)
+                        result.details.forEach { (key, value) -> Text("$key：$value") }
+                    }
+                }
+            }
             Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("返回继续检测") }
             OutlinedButton(
                 onClick = { confirmClear = true },
