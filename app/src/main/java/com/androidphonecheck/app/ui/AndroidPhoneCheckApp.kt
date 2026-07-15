@@ -56,7 +56,7 @@ fun AndroidPhoneCheckApp(automaticResults: List<DiagnosticResult>) {
     }
 }
 
-private enum class AppScreen { HOME, CHECKLIST, DISPLAY_TEST, TOUCH_TEST, CAMERA_TEST, AUDIO_TEST, PHYSICAL_TEST, SUMMARY }
+private enum class AppScreen { HOME, CHECKLIST, DISPLAY_TEST, TOUCH_TEST, CAMERA_TEST, AUDIO_TEST, PHYSICAL_TEST, SENSOR_TEST, CONNECTIVITY_TEST, BIOMETRIC_TEST, SUMMARY }
 
 @Composable
 private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
@@ -68,7 +68,7 @@ private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
     BackHandler(enabled = screen != AppScreen.HOME) {
         screen = when (screen) {
             AppScreen.SUMMARY -> AppScreen.CHECKLIST
-            AppScreen.DISPLAY_TEST, AppScreen.TOUCH_TEST, AppScreen.CAMERA_TEST, AppScreen.AUDIO_TEST, AppScreen.PHYSICAL_TEST -> AppScreen.CHECKLIST
+            AppScreen.DISPLAY_TEST, AppScreen.TOUCH_TEST, AppScreen.CAMERA_TEST, AppScreen.AUDIO_TEST, AppScreen.PHYSICAL_TEST, AppScreen.SENSOR_TEST, AppScreen.CONNECTIVITY_TEST, AppScreen.BIOMETRIC_TEST -> AppScreen.CHECKLIST
             AppScreen.CHECKLIST -> AppScreen.HOME
             AppScreen.HOME -> AppScreen.HOME
         }
@@ -96,6 +96,9 @@ private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
                     DiagnosticCategory.CAMERA -> AppScreen.CAMERA_TEST
                     DiagnosticCategory.AUDIO -> AppScreen.AUDIO_TEST
                     DiagnosticCategory.PHYSICAL -> AppScreen.PHYSICAL_TEST
+                    DiagnosticCategory.SENSOR -> AppScreen.SENSOR_TEST
+                    DiagnosticCategory.CONNECTIVITY -> AppScreen.CONNECTIVITY_TEST
+                    DiagnosticCategory.BIOMETRIC -> AppScreen.BIOMETRIC_TEST
                     else -> AppScreen.CHECKLIST
                 }
             },
@@ -132,6 +135,27 @@ private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
         AppScreen.PHYSICAL_TEST -> PhysicalTestScreen(
             onResult = { status ->
                 statuses = store.update(DiagnosticCategory.PHYSICAL, status)
+                screen = AppScreen.CHECKLIST
+            },
+            onBack = { screen = AppScreen.CHECKLIST },
+        )
+        AppScreen.SENSOR_TEST -> SensorTestScreen(
+            onResult = { status ->
+                statuses = store.update(DiagnosticCategory.SENSOR, status)
+                screen = AppScreen.CHECKLIST
+            },
+            onBack = { screen = AppScreen.CHECKLIST },
+        )
+        AppScreen.CONNECTIVITY_TEST -> ConnectivityTestScreen(
+            onResult = { status ->
+                statuses = store.update(DiagnosticCategory.CONNECTIVITY, status)
+                screen = AppScreen.CHECKLIST
+            },
+            onBack = { screen = AppScreen.CHECKLIST },
+        )
+        AppScreen.BIOMETRIC_TEST -> BiometricTestScreen(
+            onResult = { status ->
+                statuses = store.update(DiagnosticCategory.BIOMETRIC, status)
                 screen = AppScreen.CHECKLIST
             },
             onBack = { screen = AppScreen.CHECKLIST },
@@ -274,6 +298,9 @@ private fun ChecklistScreen(
                                 DiagnosticCategory.CAMERA,
                                 DiagnosticCategory.AUDIO,
                                 DiagnosticCategory.PHYSICAL,
+                                DiagnosticCategory.SENSOR,
+                                DiagnosticCategory.CONNECTIVITY,
+                                DiagnosticCategory.BIOMETRIC,
                             )
                         ) {
                             onInteractiveTest(category)
