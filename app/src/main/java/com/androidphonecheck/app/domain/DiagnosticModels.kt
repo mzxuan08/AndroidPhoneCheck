@@ -18,6 +18,8 @@ enum class DiagnosticCategory(val displayName: String) {
 enum class DiagnosticStatus(val displayName: String) {
     NORMAL("正常"),
     ABNORMAL("异常"),
+    SUSPECTED("疑似异常"),
+    ENVIRONMENT_UNSUITABLE("环境不适合"),
     RISK("风险提示"),
     NOT_TESTED("未测试"),
     UNSUPPORTED("不支持"),
@@ -53,7 +55,8 @@ data class DiagnosticSummary(
             riskCount = results.count { it.status == DiagnosticStatus.RISK },
             incompleteCount = results.count {
                 it.status == DiagnosticStatus.NOT_TESTED ||
-                    it.status == DiagnosticStatus.PERMISSION_REQUIRED
+                    it.status == DiagnosticStatus.PERMISSION_REQUIRED ||
+                    it.status == DiagnosticStatus.ENVIRONMENT_UNSUITABLE
             },
         )
     }
@@ -62,8 +65,8 @@ data class DiagnosticSummary(
 fun List<DiagnosticResult>.sortedForSummary(): List<DiagnosticResult> =
     sortedWith(
         compareByDescending<DiagnosticResult> { it.status == DiagnosticStatus.ABNORMAL }
+            .thenByDescending { it.status == DiagnosticStatus.SUSPECTED }
             .thenByDescending { it.status == DiagnosticStatus.RISK }
             .thenByDescending { it.severity.priority }
             .thenBy { it.category.ordinal },
     )
-

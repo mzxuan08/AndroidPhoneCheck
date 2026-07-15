@@ -68,6 +68,48 @@ object CameraAlgorithm {
     }
 }
 
+class CameraSequenceAnalyzer(private val requiredSamples: Int = 15) {
+    private val samples = ArrayList<CameraMetrics>()
+    private val frameDifferences = ArrayList<Double>()
+    private var previous: ByteArray? = null
+
+    fun add(luma: ByteArray, metrics: CameraMetrics): CameraAssessment? {
+        previous?.takeIf { it.size == luma.size }?.let { old ->
+            var difference = 0.0
+            var count = 0
+            for (index in luma.indices step 16) {
+                difference += abs((luma[index].toInt() and 0xff) - (old[index].toInt() and 0xff))
+                count++
+            }
+            frameDifferences += difference / count.coerceAtLeast(1)
+        }
+        previous = luma.copyOf()
+        samples += metrics
+        if (samples.size < requiredSamples) return null
+
+        fun average(value: (CameraMetrics) -> Double) = samples.map(value).average()
+        val averaged = CameraMetrics(
+            meanLuma = average { it.meanLuma },
+            darkRatio = average { it.darkRatio },
+            brightRatio = average { it.brightRatio },
+            sharpness = average { it.sharpness },
+            chromaOffset = average { it.chromaOffset },
+        )
+        val base = CameraAlgorithm.assess(averaged)
+        val reasons = base.reasons.toMutableList()
+        val meanFrameDifference = frameDifferences.average().takeUnless { it.isNaN() } ?: 0.0
+        if (meanFrameDifference < .25 && averaged.sharpness > 35) reasons += "连续画面几乎完全不变，疑似画面冻结"
+        val verdict = when {
+            base.verdict == AlgorithmVerdict.UNSUITABLE -> AlgorithmVerdict.UNSUITABLE
+            reasons.isNotEmpty() -> AlgorithmVerdict.SUSPECTED
+            else -> AlgorithmVerdict.NORMAL
+        }
+        samples.clear()
+        frameDifferences.clear()
+        return CameraAssessment(verdict, reasons, averaged)
+    }
+}
+
 data class AudioMetrics(
     val rms: Double,
     val peak: Int,

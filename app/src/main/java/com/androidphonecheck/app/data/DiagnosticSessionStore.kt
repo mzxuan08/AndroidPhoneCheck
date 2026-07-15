@@ -30,10 +30,17 @@ class DiagnosticSessionStore(context: Context) {
     fun update(
         category: DiagnosticCategory,
         status: DiagnosticStatus,
+        evidence: String? = null,
     ): Map<DiagnosticCategory, DiagnosticStatus> {
-        preferences.edit().putString(statusKey(category), status.name).apply()
+        preferences.edit().putString(statusKey(category), status.name).apply {
+            if (evidence != null) putString(evidenceKey(category), evidence)
+        }.apply()
         return loadStatuses()
     }
+
+    fun loadEvidence(): Map<DiagnosticCategory, String> = DiagnosticCategory.entries.mapNotNull { category ->
+        preferences.getString(evidenceKey(category), null)?.let { category to it }
+    }.toMap()
 
     fun clear(): Map<DiagnosticCategory, DiagnosticStatus> {
         preferences.edit().clear().apply()
@@ -53,9 +60,9 @@ class DiagnosticSessionStore(context: Context) {
     }
 
     private fun statusKey(category: DiagnosticCategory) = "status_${category.name}"
+    private fun evidenceKey(category: DiagnosticCategory) = "evidence_${category.name}"
 
     private companion object {
         const val KEY_STARTED = "started"
     }
 }
-

@@ -51,16 +51,18 @@ import com.androidphonecheck.app.diagnostic.AudioAlgorithm
 import com.androidphonecheck.app.diagnostic.AudioAssessment
 import com.androidphonecheck.app.diagnostic.CameraAlgorithm
 import com.androidphonecheck.app.diagnostic.CameraAssessment
+import com.androidphonecheck.app.diagnostic.CameraSequenceAnalyzer
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.PI
 import kotlin.math.sin
 
 @Composable
 fun CameraTestScreen(
-    onResult: (DiagnosticStatus) -> Unit,
+    onResult: (DiagnosticStatus, String) -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -69,7 +71,7 @@ fun CameraTestScreen(
     }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         granted = it
-        if (!it) onResult(DiagnosticStatus.PERMISSION_REQUIRED)
+        if (!it) onResult(DiagnosticStatus.PERMISSION_REQUIRED, "相机权限被拒绝")
     }
     BackHandler(onBack = onBack)
 
@@ -131,8 +133,14 @@ fun CameraTestScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("切换前后摄像头", color = Color.White) }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = { onResult(DiagnosticStatus.NORMAL) }, modifier = Modifier.weight(1f)) { Text("画面正常") }
-                Button(onClick = { onResult(DiagnosticStatus.ABNORMAL) }, modifier = Modifier.weight(1f)) { Text("发现异常") }
+                Button(onClick = { onResult(DiagnosticStatus.NORMAL, assessment.cameraEvidence()) }, modifier = Modifier.weight(1f)) { Text("画面正常") }
+                Button(onClick = { onResult(DiagnosticStatus.ABNORMAL, assessment.cameraEvidence()) }, modifier = Modifier.weight(1f)) { Text("发现异常") }
+            }
+            assessment?.takeIf { it.verdict != AlgorithmVerdict.NORMAL }?.let { result ->
+                OutlinedButton(
+                    onClick = { onResult(if (result.verdict == AlgorithmVerdict.UNSUITABLE) DiagnosticStatus.ENVIRONMENT_UNSUITABLE else DiagnosticStatus.SUSPECTED, result.cameraEvidence()) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("按算法建议记录", color = Color.White) }
             }
             OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("稍后测试", color = Color.White) }
         }
@@ -152,25 +160,33 @@ private fun CameraPreview(
     val analysisExecutor = remember(lensFacing) { Executors.newSingleThreadExecutor() }
 
     DisposableEffect(lensFacing, lifecycleOwner) {
+        val disposed = AtomicBoolean(false)
         val executor = ContextCompat.getMainExecutor(context)
         val listener = Runnable {
+            if (disposed.get()) return@Runnable
             runCatching {
                 val provider = providerFuture.get()
+                if (disposed.get()) return@runCatching
                 val preview = Preview.Builder().build().also { it.surfaceProvider = previewView.surfaceProvider }
                 val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
                 val analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                 var frameCount = 0
+                val sequence = CameraSequenceAnalyzer()
                 analysis.setAnalyzer(analysisExecutor) { image ->
                     try {
                         frameCount++
-                        if (frameCount % 8 == 0) {
+                        if (frameCount % 4 == 0) {
                             val y = image.copyPlane(0)
                             val uMean = image.planeMean(1)
                             val vMean = image.planeMean(2)
-                            val result = CameraAlgorithm.assess(CameraAlgorithm.measure(y, image.width, image.height, uMean, vMean))
-                            ContextCompat.getMainExecutor(context).execute { onAssessment(result) }
+                            sequence.add(y, CameraAlgorithm.measure(y, image.width, image.height, uMean, vMean))
+                                ?.let { result ->
+                                    if (!disposed.get()) ContextCompat.getMainExecutor(context).execute {
+                                        if (!disposed.get()) onAssessment(result)
+                                    }
+                                }
                         }
                     } finally {
                         image.close()
@@ -182,7 +198,8 @@ private fun CameraPreview(
         }
         providerFuture.addListener(listener, executor)
         onDispose {
-            runCatching { providerFuture.get().unbindAll() }
+            disposed.set(true)
+            if (providerFuture.isDone) runCatching { providerFuture.get().unbindAll() }
             analysisExecutor.shutdown()
         }
     }
@@ -216,7 +233,7 @@ private fun ImageProxy.planeMean(index: Int): Double {
 @Composable
 @Suppress("DEPRECATION")
 fun AudioTestScreen(
-    onResult: (DiagnosticStatus) -> Unit,
+    onResult: (DiagnosticStatus, String) -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -225,7 +242,7 @@ fun AudioTestScreen(
     }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         granted = it
-        if (!it) onResult(DiagnosticStatus.PERMISSION_REQUIRED)
+        if (!it) onResult(DiagnosticStatus.PERMISSION_REQUIRED, "麦克风权限被拒绝")
     }
     BackHandler(onBack = onBack)
     if (!granted) {
@@ -244,6 +261,7 @@ fun AudioTestScreen(
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
     var state by remember { mutableStateOf("等待录音") }
     var audioAssessment by remember { mutableStateOf<AudioAssessment?>(null) }
+    val speakerPlayback = remember { SpeakerPlayback() }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -252,6 +270,7 @@ fun AudioTestScreen(
             recordThread?.interrupt()
             player?.release()
             recordingFile.delete()
+            speakerPlayback.release()
         }
     }
 
@@ -359,17 +378,34 @@ fun AudioTestScreen(
         }
         Text("扬声器辅助测试（请听是否清晰、有无破音）")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton({ playSpeakerTone(-1f, false) }, Modifier.weight(1f)) { Text("左声道") }
-            OutlinedButton({ playSpeakerTone(1f, false) }, Modifier.weight(1f)) { Text("右声道") }
-            OutlinedButton({ playSpeakerTone(0f, true) }, Modifier.weight(1f)) { Text("扫频") }
+            OutlinedButton({ speakerPlayback.play(-1f, false) }, Modifier.weight(1f)) { Text("左声道") }
+            OutlinedButton({ speakerPlayback.play(1f, false) }, Modifier.weight(1f)) { Text("右声道") }
+            OutlinedButton({ speakerPlayback.play(0f, true) }, Modifier.weight(1f)) { Text("扫频") }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(onClick = { onResult(DiagnosticStatus.NORMAL) }, modifier = Modifier.weight(1f)) { Text("声音正常") }
-            Button(onClick = { onResult(DiagnosticStatus.ABNORMAL) }, modifier = Modifier.weight(1f)) { Text("发现异常") }
+            Button(onClick = { onResult(DiagnosticStatus.NORMAL, audioAssessment.audioEvidence()) }, modifier = Modifier.weight(1f)) { Text("声音正常") }
+            Button(onClick = { onResult(DiagnosticStatus.ABNORMAL, audioAssessment.audioEvidence()) }, modifier = Modifier.weight(1f)) { Text("发现异常") }
+        }
+        audioAssessment?.takeIf { it.verdict != AlgorithmVerdict.NORMAL }?.let { result ->
+            OutlinedButton(
+                onClick = { onResult(if (result.verdict == AlgorithmVerdict.UNSUITABLE) DiagnosticStatus.ENVIRONMENT_UNSUITABLE else DiagnosticStatus.SUSPECTED, result.audioEvidence()) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("按算法建议记录") }
         }
         OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("稍后测试") }
     }
 }
+
+private fun CameraAssessment?.cameraEvidence(): String = this?.let {
+    String.format(Locale.getDefault(), "算法=%s；亮度=%.1f；清晰度=%.1f；偏色=%.1f；依据=%s",
+        verdict.name, metrics.meanLuma, metrics.sharpness, metrics.chromaOffset, reasons.joinToString("；").ifEmpty { "无异常指标" })
+} ?: "人工检查，算法尚未完成"
+
+private fun AudioAssessment?.audioEvidence(): String = this?.let {
+    String.format(Locale.getDefault(), "算法=%s；RMS=%.1f；SNR=%.1fdB；削波=%.2f%%；断音=%.2f%%；依据=%s",
+        verdict.name, metrics.rms, metrics.snrDb, metrics.clippingRatio * 100, metrics.dropoutRatio * 100,
+        reasons.joinToString("；").ifEmpty { "无异常指标" })
+} ?: "人工检查，算法尚未完成"
 
 private fun writeWave(file: File, samples: ShortArray, sampleRate: Int) {
     val dataSize = samples.size * 2
@@ -384,36 +420,58 @@ private fun writeWave(file: File, samples: ShortArray, sampleRate: Int) {
     }
 }
 
-private fun playSpeakerTone(pan: Float, sweep: Boolean) {
-    Thread {
+private class SpeakerPlayback {
+    @Volatile private var track: AudioTrack? = null
+    @Volatile private var worker: Thread? = null
+
+    @Synchronized fun play(pan: Float, sweep: Boolean) {
+        release()
+        worker = Thread {
         val rate = 44_100
         val duration = 2
         val mono = ShortArray(rate * duration) { index ->
-            val progress = index.toDouble() / monoSize(rate, duration)
-            val frequency = if (sweep) 200.0 + 3_800.0 * progress else 880.0
-            (sin(2 * PI * frequency * index / rate) * 7_000).toInt().toShort()
+            val time = index.toDouble() / rate
+            val phase = if (sweep) {
+                val slope = 3_800.0 / duration
+                2 * PI * (200.0 * time + .5 * slope * time * time)
+            } else 2 * PI * 880.0 * time
+            (sin(phase) * 7_000).toInt().toShort()
         }
         val stereo = ShortArray(mono.size * 2)
         mono.forEachIndexed { index, value ->
             stereo[index * 2] = if (pan > .5f) 0 else value
             stereo[index * 2 + 1] = if (pan < -.5f) 0 else value
         }
-        val track = AudioTrack.Builder()
+        val audioTrack = AudioTrack.Builder()
             .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).build())
             .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                 .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).build())
             .setBufferSizeInBytes(stereo.size * 2)
             .setTransferMode(AudioTrack.MODE_STATIC)
             .build()
-        track.write(stereo, 0, stereo.size)
-        track.play()
-        Thread.sleep(duration * 1_000L + 100)
-        track.stop()
-        track.release()
-    }.start()
-}
+        track = audioTrack
+        runCatching {
+            audioTrack.write(stereo, 0, stereo.size)
+            audioTrack.play()
+            Thread.sleep(duration * 1_000L + 100)
+            audioTrack.stop()
+        }
+        audioTrack.release()
+        if (track === audioTrack) track = null
+        }.also { it.start() }
+    }
 
-private fun monoSize(rate: Int, duration: Int): Double = (rate * duration).toDouble()
+    @Synchronized fun release() {
+        worker?.interrupt()
+        worker = null
+        track?.let { audioTrack ->
+            runCatching { audioTrack.pause() }
+            runCatching { audioTrack.flush() }
+            runCatching { audioTrack.release() }
+        }
+        track = null
+    }
+}
 
 @Composable
 private fun PermissionPrompt(

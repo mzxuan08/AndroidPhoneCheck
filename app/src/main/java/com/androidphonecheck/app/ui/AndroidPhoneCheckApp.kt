@@ -63,6 +63,7 @@ private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
     val context = LocalContext.current
     val store = remember { DiagnosticSessionStore(context.applicationContext) }
     var statuses by remember { mutableStateOf(store.loadStatuses()) }
+    var evidence by remember { mutableStateOf(store.loadEvidence()) }
     var screen by remember { mutableStateOf(AppScreen.HOME) }
 
     BackHandler(enabled = screen != AppScreen.HOME) {
@@ -121,15 +122,17 @@ private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
             onBack = { screen = AppScreen.CHECKLIST },
         )
         AppScreen.CAMERA_TEST -> CameraTestScreen(
-            onResult = { status ->
-                statuses = store.update(DiagnosticCategory.CAMERA, status)
+            onResult = { status, detail ->
+                statuses = store.update(DiagnosticCategory.CAMERA, status, detail)
+                evidence = store.loadEvidence()
                 screen = AppScreen.CHECKLIST
             },
             onBack = { screen = AppScreen.CHECKLIST },
         )
         AppScreen.AUDIO_TEST -> AudioTestScreen(
-            onResult = { status ->
-                statuses = store.update(DiagnosticCategory.AUDIO, status)
+            onResult = { status, detail ->
+                statuses = store.update(DiagnosticCategory.AUDIO, status, detail)
+                evidence = store.loadEvidence()
                 screen = AppScreen.CHECKLIST
             },
             onBack = { screen = AppScreen.CHECKLIST },
@@ -179,9 +182,11 @@ private fun DiagnosticFlow(automaticResults: List<DiagnosticResult>) {
         AppScreen.SUMMARY -> SummaryScreen(
             statuses = statuses,
             automaticResults = automaticResults,
+            evidence = evidence,
             onBack = { screen = AppScreen.CHECKLIST },
             onClear = {
                 statuses = store.clear()
+                evidence = emptyMap()
                 screen = AppScreen.HOME
             },
         )
@@ -364,6 +369,8 @@ private fun StatusDialog(
                 listOf(
                     DiagnosticStatus.NORMAL,
                     DiagnosticStatus.ABNORMAL,
+                    DiagnosticStatus.SUSPECTED,
+                    DiagnosticStatus.ENVIRONMENT_UNSUITABLE,
                     DiagnosticStatus.RISK,
                     DiagnosticStatus.NOT_TESTED,
                     DiagnosticStatus.UNSUPPORTED,
@@ -388,14 +395,16 @@ private fun StatusDialog(
 private fun SummaryScreen(
     statuses: Map<DiagnosticCategory, DiagnosticStatus>,
     automaticResults: List<DiagnosticResult>,
+    evidence: Map<DiagnosticCategory, String>,
     onBack: () -> Unit,
     onClear: () -> Unit,
 ) {
     var confirmClear by remember { mutableStateOf(false) }
     val abnormal = statuses.values.count { it == DiagnosticStatus.ABNORMAL }
+    val suspected = statuses.values.count { it == DiagnosticStatus.SUSPECTED }
     val risks = statuses.values.count { it == DiagnosticStatus.RISK }
     val incomplete = statuses.values.count {
-        it == DiagnosticStatus.NOT_TESTED || it == DiagnosticStatus.PERMISSION_REQUIRED
+        it == DiagnosticStatus.NOT_TESTED || it == DiagnosticStatus.PERMISSION_REQUIRED || it == DiagnosticStatus.ENVIRONMENT_UNSUITABLE
     }
     Scaffold(topBar = { TopAppBar(title = { Text("验机结果") }) }) { innerPadding ->
         Column(
@@ -406,10 +415,18 @@ private fun SummaryScreen(
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Text("异常 $abnormal 项 · 风险 $risks 项 · 未完成 $incomplete 项", fontWeight = FontWeight.Bold)
+            Text("异常 $abnormal 项 · 疑似 $suspected 项 · 风险 $risks 项 · 未完成 $incomplete 项", fontWeight = FontWeight.Bold)
             statuses.entries
                 .sortedByDescending { statusPriority(it.value) }
                 .forEach { (category, status) -> CategoryRow(category, status.displayName) }
+            if (evidence.isNotEmpty()) {
+                Text("算法与人工依据", style = MaterialTheme.typography.titleMedium)
+                evidence.forEach { (category, detail) ->
+                    Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp)) {
+                        Text(category.displayName, fontWeight = FontWeight.Bold); Text(detail)
+                    } }
+                }
+            }
             Text("自动采集详情", style = MaterialTheme.typography.titleMedium)
             automaticResults.forEach { result ->
                 Card(modifier = Modifier.fillMaxWidth()) {
@@ -441,6 +458,8 @@ private fun SummaryScreen(
 
 private fun statusPriority(status: DiagnosticStatus): Int = when (status) {
     DiagnosticStatus.ABNORMAL -> 6
+    DiagnosticStatus.SUSPECTED -> 5
+    DiagnosticStatus.ENVIRONMENT_UNSUITABLE -> 3
     DiagnosticStatus.RISK -> 5
     DiagnosticStatus.PERMISSION_REQUIRED -> 4
     DiagnosticStatus.NOT_TESTED -> 3
